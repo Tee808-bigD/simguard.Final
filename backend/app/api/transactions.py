@@ -1,36 +1,87 @@
-"""Transaction API endpoints — submit and retrieve transactions."""
-
 import logging
+import re
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Request, Query
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from ..config import get_settings
 from ..database import get_db
+from ..models.fraud_alert import ActionTaken, FraudAlert
 from ..models.transaction import Transaction, TransactionStatus
-from ..models.fraud_alert import FraudAlert, ActionTaken
 from ..schemas.transaction import TransactionCreate, TransactionResponse
-from ..schemas.fraud_alert import FraudAlertResponse
+from ..services.ai_engine import analyze_fraud_risk
 from ..services.camara import camara_service
 from ..services.fraud_detector import compute_risk_score, determine_alert_type
-from ..services.ai_engine import analyze_fraud_risk
 from ..websocket import ws_manager
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/transactions", tags=["transactions"])
+settings = get_settings()
 
 
-@router.post("", response_model=TransactionResponse, status_code=201)
-async def create_transaction(
+def _risk_level_from_score(score: int) -> str:
+    if score >= 75:
+        return "critical"
+    if score >= 51:
+        return "high"
+    if score >= 26:
+        return "medium"
+    return "low"
+
+
+def _result_source(camara_results: dict, ai_result: dict) -> str:
+    if ai_result.get("source") == "claude_ai":
+        return "live_ai"
+    signal_sources = {
+        value.get("source")
+        for value in camara_results.values()
+        if isinstance(value, dict) and value.get("source")
+    }
+    if "camara" in signal_sources and "simulation" in signal_sources:
+        return "hybrid"
+    if "camara" in signal_sources:
+        return "camara"
+    return "simulation"
+
+
+def serialize_transaction(txn: Transaction, risk_level: str | None = None, ai_result: dict | None = None) -> dict:
+    computed_risk_level = risk_level or _risk_level_from_score(txn.risk_score or 0)
+    computed_ai = ai_result or {
+        "primary_reason": txn.ai_explanation,
+        "recommended_actions": [],
+        "confidence": min((txn.risk_score or 0) + 20, 95),
+        "fraud_pattern": None,
+        "source": "history",
+    }
+    return {
+        "id": txn.id,
+        "phone_number": txn.phone_number,
+        "amount": txn.amount,
+        "currency": txn.currency,
+        "transaction_type": txn.transaction_type,
+        "recipient": txn.recipient,
+        "status": txn.status,
+        "risk_score": txn.risk_score,
+        "risk_level": computed_risk_level,
+        "ai_decision": txn.ai_decision,
+        "ai_explanation": txn.ai_explanation,
+        "primary_reason": computed_ai.get("primary_reason"),
+        "recommended_actions": computed_ai.get("recommended_actions", []),
+        "confidence": computed_ai.get("confidence"),
+        "fraud_pattern": computed_ai.get("fraud_pattern"),
+        "source": _result_source(txn.camara_results or {}, computed_ai),
+        "integration_mode": settings.integration_mode,
+        "camara_results": txn.camara_results,
+        "created_at": txn.created_at,
+    }
+
+
+async def process_transaction(
     payload: TransactionCreate,
-    request: Request,
-    db: Session = Depends(get_db),
+    db: Session,
 ):
-    """Submit a transaction for real-time fraud analysis."""
-
-    # 1. CAMARA checks
-    camara_results = camara_service.full_check(payload.phone_number)
-
-    # 2. Rule-based scoring
+    camara_results = camara_service.full_check(payload.phone_number, expected_phone_number=payload.phone_number)
     risk_score, risk_level, reasons = compute_risk_score(
         phone_number=payload.phone_number,
         amount=payload.amount,
@@ -38,8 +89,6 @@ async def create_transaction(
         recipient=payload.recipient,
         camara_results=camara_results,
     )
-
-    # 3. AI decision
     ai_result = analyze_fraud_risk(
         phone_number=payload.phone_number,
         amount=payload.amount,
@@ -52,7 +101,6 @@ async def create_transaction(
         reasons=reasons,
     )
 
-    # 4. Map AI decision to status
     decision = ai_result.get("decision", "FLAG_FOR_REVIEW")
     status_map = {
         "BLOCK": TransactionStatus.BLOCKED,
@@ -61,7 +109,6 @@ async def create_transaction(
     }
     status = status_map.get(decision, TransactionStatus.FLAGGED)
 
-    # 5. Persist transaction
     txn = Transaction(
         phone_number=payload.phone_number,
         amount=payload.amount,
@@ -77,7 +124,6 @@ async def create_transaction(
     db.add(txn)
     db.flush()
 
-    # 6. Persist fraud alert if risk >= medium
     if risk_score >= 26 or status in (TransactionStatus.BLOCKED, TransactionStatus.FLAGGED):
         action_map = {
             TransactionStatus.BLOCKED: ActionTaken.BLOCKED,
@@ -100,27 +146,17 @@ async def create_transaction(
     db.commit()
     db.refresh(txn)
 
-    # 7. Broadcast to dashboard via WebSocket
-    await ws_manager.broadcast({
-        "type": "transaction",
-        "data": {
-            "id": txn.id,
-            "phone_number": txn.phone_number,
-            "amount": txn.amount,
-            "currency": txn.currency,
-            "status": txn.status,
-            "risk_score": txn.risk_score,
-            "ai_decision": txn.ai_decision,
-            "ai_explanation": txn.ai_explanation,
-            "primary_reason": ai_result.get("primary_reason"),
-            "recommended_actions": ai_result.get("recommended_actions", []),
-            "fraud_pattern": ai_result.get("fraud_pattern"),
-            "camara_results": camara_results,
-            "created_at": txn.created_at.isoformat(),
-        }
-    })
+    response_payload = serialize_transaction(txn, risk_level=risk_level, ai_result=ai_result)
+    await ws_manager.broadcast({"type": "transaction", "data": response_payload})
+    return response_payload
 
-    return txn
+
+@router.post("", response_model=TransactionResponse, status_code=201)
+async def create_transaction(
+    payload: TransactionCreate,
+    db: Session = Depends(get_db),
+):
+    return await process_transaction(payload=payload, db=db)
 
 
 @router.get("", response_model=list[TransactionResponse])
@@ -131,24 +167,20 @@ def list_transactions(
     status: Optional[str] = Query(default=None),
     phone: Optional[str] = Query(default=None),
 ):
-    """List transactions with optional filters."""
-    q = db.query(Transaction)
+    query = db.query(Transaction)
     if status:
-        q = q.filter(Transaction.status == status)
+        query = query.filter(Transaction.status == status)
     if phone:
-        # Validate phone before using in query
-        import re
         if not re.match(r"^\+[1-9]\d{6,14}$", phone):
             raise HTTPException(status_code=400, detail="Invalid phone format")
-        q = q.filter(Transaction.phone_number == phone)
-    transactions = q.order_by(Transaction.created_at.desc()).offset(offset).limit(limit).all()
-    return transactions
+        query = query.filter(Transaction.phone_number == phone)
+    rows = query.order_by(Transaction.created_at.desc()).offset(offset).limit(limit).all()
+    return [serialize_transaction(txn) for txn in rows]
 
 
 @router.get("/{txn_id}", response_model=TransactionResponse)
 def get_transaction(txn_id: int, db: Session = Depends(get_db)):
-    """Get a single transaction by ID."""
     txn = db.query(Transaction).filter(Transaction.id == txn_id).first()
     if not txn:
         raise HTTPException(status_code=404, detail="Transaction not found")
-    return txn
+    return serialize_transaction(txn)

@@ -1,29 +1,14 @@
-"""Claude Agentic AI Engine — the core differentiator of SimGuard.
-
-Receives transaction details + CAMARA results + rule-based score,
-and makes an autonomous fraud decision with human-readable explanation.
-"""
-
 import json
 import logging
 from typing import Optional
+
 from ..config import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
 SYSTEM_PROMPT = """You are SimGuard AI, an expert fraud detection system specializing in
-SIM swap fraud prevention for African mobile money networks (M-Pesa, MTN MoMo, Airtel Money, etc.).
-
-You have deep knowledge of:
-- SIM swap fraud patterns: attackers obtain a duplicate SIM, intercept OTPs, drain mobile wallets
-- Device swap fraud: victim's number ported to attacker's handset
-- African mobile money fraud peaks: month-end (salary day), market days, festive seasons
-- Agent collusion patterns: agents processing suspicious transactions for commission
-- Velocity attacks: multiple small transactions to avoid detection
-- Social engineering: fraudsters calling MNOs impersonating victims
-
-Your job is to analyze transaction data + Nokia CAMARA API results and make a decision.
+SIM swap fraud prevention for African mobile money networks.
 
 Always respond in valid JSON with this exact structure:
 {
@@ -34,13 +19,7 @@ Always respond in valid JSON with this exact structure:
   "recommended_actions": ["action1", "action2"],
   "fraud_pattern": "sim_swap_drain" | "device_takeover" | "high_value_suspicious" | "normal" | "coordinated_attack"
 }
-
-Decision thresholds:
-- BLOCK: risk_score >= 60 OR (SIM swap in last 24h AND amount > $100 equivalent)
-- FLAG_FOR_REVIEW: risk_score 30-59 OR SIM swap in last 7 days
-- APPROVE: risk_score < 30 AND no recent SIM swap signals
-
-Be decisive. Mobile agents need clear guidance instantly."""
+"""
 
 
 def analyze_fraud_risk(
@@ -54,18 +33,17 @@ def analyze_fraud_risk(
     risk_level: str,
     reasons: list[str],
 ) -> dict:
-    """Call Claude to analyze fraud risk and make a decision.
+    if settings.integration_mode == "SIMULATION":
+        return _rule_based_fallback(risk_score, risk_level, reasons, camara_results)
 
-    Falls back to rule-based decision if API key is missing or call fails.
-    """
     if not settings.anthropic_api_key or settings.anthropic_api_key.startswith("sk-ant-your"):
-        logger.warning("ANTHROPIC_API_KEY not configured — using rule-based fallback")
+        logger.warning("ANTHROPIC_API_KEY not configured - using deterministic fallback")
         return _rule_based_fallback(risk_score, risk_level, reasons, camara_results)
 
     try:
         import anthropic
-        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
+        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
         user_message = f"""Analyze this mobile money transaction for fraud:
 
 TRANSACTION:
@@ -80,79 +58,66 @@ CAMARA API RESULTS:
 RULE-BASED SCORING:
 - Risk score: {risk_score}/100
 - Risk level: {risk_level}
-- Detected signals: {chr(10).join(f'  • {r}' for r in reasons) if reasons else '  • None'}
-
-Make your fraud decision now."""
+- Detected signals: {chr(10).join(f'  - {reason}' for reason in reasons) if reasons else '  - None'}
+"""
 
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=600,
+            max_tokens=500,
             system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_message}]
+            messages=[{"role": "user", "content": user_message}],
         )
-
         raw = response.content[0].text.strip()
-        # Strip markdown code fences if present
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
                 raw = raw[4:]
         result = json.loads(raw.strip())
-
-        # Validate required fields
-        required = {"decision", "confidence", "primary_reason", "detailed_explanation",
-                    "recommended_actions", "fraud_pattern"}
-        if not required.issubset(result.keys()):
+        required = {"decision", "confidence", "primary_reason", "detailed_explanation", "recommended_actions", "fraud_pattern"}
+        if not required.issubset(result):
             raise ValueError("Incomplete AI response")
-
         result["source"] = "claude_ai"
         return result
-
-    except Exception as e:
-        logger.error(f"Claude AI analysis failed: {e}")
+    except Exception as exc:
+        logger.warning(f"Claude analysis failed, using deterministic fallback: {exc}")
         return _rule_based_fallback(risk_score, risk_level, reasons, camara_results)
 
 
-def _rule_based_fallback(
-    risk_score: int,
-    risk_level: str,
-    reasons: list[str],
-    camara_results: dict,
-) -> dict:
-    """Deterministic fallback when Claude is unavailable."""
+def _rule_based_fallback(risk_score: int, risk_level: str, reasons: list[str], camara_results: dict) -> dict:
     sim_24h = camara_results.get("sim_swap_24h", {}).get("swapped", False)
+    device_swap = camara_results.get("device_swap", {}).get("swapped", False)
 
     if risk_score >= 60 or sim_24h:
         decision = "BLOCK"
-        primary = "High-risk transaction blocked due to fraud indicators"
+        primary = "Block this transaction immediately due to active fraud indicators."
         actions = [
-            "Do NOT process this transaction",
-            "Ask customer to visit a physical branch with ID",
-            "Report to fraud team immediately"
+            "Do not process the transaction.",
+            "Ask the customer to complete in-person verification.",
+            "Escalate to the fraud operations team.",
         ]
-        pattern = "sim_swap_drain" if sim_24h else "coordinated_attack"
+        pattern = "coordinated_attack" if device_swap else "sim_swap_drain"
     elif risk_score >= 30:
         decision = "FLAG_FOR_REVIEW"
-        primary = "Transaction flagged — requires additional verification"
+        primary = "Pause and perform additional customer verification before proceeding."
         actions = [
-            "Request secondary ID verification from customer",
-            "Call customer on an alternate number to confirm",
-            "Proceed only after confirmation"
+            "Check a second form of customer identity.",
+            "Confirm the transaction on an alternate channel.",
+            "Proceed only after manual confirmation.",
         ]
-        pattern = "high_value_suspicious"
+        pattern = "device_takeover" if device_swap else "high_value_suspicious"
     else:
         decision = "APPROVE"
-        primary = "Transaction appears legitimate"
-        actions = ["Proceed with transaction normally"]
+        primary = "No significant telecom fraud indicators were detected."
+        actions = ["Proceed with the transaction."]
         pattern = "normal"
 
     return {
         "decision": decision,
         "confidence": min(risk_score + 20, 95),
         "primary_reason": primary,
-        "detailed_explanation": f"Risk score: {risk_score}/100 ({risk_level}). " +
-                                (f"Signals: {'; '.join(reasons[:2])}" if reasons else "No fraud signals detected."),
+        "detailed_explanation": f"Risk score: {risk_score}/100 ({risk_level}). "
+        + (f"Signals: {'; '.join(reasons[:3])}" if reasons else "No telecom risk signals were raised."),
         "recommended_actions": actions,
         "fraud_pattern": pattern,
-        "source": "rule_based_fallback"
+        "source": "rule_based_fallback",
     }

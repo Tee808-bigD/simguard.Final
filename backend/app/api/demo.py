@@ -1,37 +1,69 @@
-import asyncio, random
-from datetime import datetime
-from fastapi import APIRouter
-from ..websocket import manager
+import asyncio
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+from ..database import SessionLocal, get_db
+from ..models.fraud_alert import FraudAlert
+from ..models.transaction import Transaction, TransactionType
+from ..schemas.transaction import TransactionCreate
+from ..services.demo_scenarios import get_demo_scenario, list_demo_scenarios
+from ..websocket import ws_manager
+from .transactions import process_transaction
 
 router = APIRouter(prefix="/api/demo", tags=["demo"])
 
-PHONES = ["+254700000001", "+254711000002", "+254722000003"]
 
-async def _run():
-    for i in range(10):
-        await asyncio.sleep(2)
-        risk = random.randint(10, 95)
-        decision = "BLOCK" if risk>=75 else "FLAG_FOR_REVIEW" if risk>=50 else "APPROVE"
-        await manager.broadcast({
-            "type": "transaction",
-            "data": {
-                "id": f"demo-{i}",
-                "phone_number": random.choice(PHONES),
-                "amount": random.randint(500, 50000),
-                "currency": "KES",
-                "status": "blocked" if decision=="BLOCK" else "flagged" if decision=="FLAG_FOR_REVIEW" else "approved",
-                "risk_score": risk,
-                "risk_level": "critical" if risk>=75 else "high" if risk>=50 else "low",
-                "ai_decision": decision,
-                "sim_swap": risk > 70,
-                "device_swap": risk > 80,
-                "risk_summary": f"Risk score {risk}/100",
-                "recommended_actions": ["Verify identity"] if risk>50 else [],
-                "created_at": datetime.utcnow().isoformat(),
-            }
-        })
+@router.get("/scenarios")
+def scenarios():
+    return {"scenarios": list_demo_scenarios()}
 
-@router.post("/start-stream")
-async def start_stream():
-    asyncio.create_task(_run())
-    return {"status": "started", "transactions": 10}
+
+@router.post("/reset")
+async def reset_demo(db: Session = Depends(get_db)):
+    db.query(FraudAlert).delete()
+    db.query(Transaction).delete()
+    db.commit()
+    await ws_manager.broadcast({"type": "dashboard_reset", "data": {"status": "ok"}})
+    return {"status": "reset"}
+
+
+@router.post("/run-scenario/{scenario_id}")
+async def run_scenario(scenario_id: str, db: Session = Depends(get_db)):
+    scenario = get_demo_scenario(scenario_id)
+    if not scenario:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    payload = TransactionCreate(
+        phone_number=scenario["payload"]["phone_number"],
+        amount=scenario["payload"]["amount"],
+        currency=scenario["payload"]["currency"],
+        transaction_type=TransactionType(scenario["payload"]["transaction_type"]),
+        recipient=scenario["payload"].get("recipient"),
+        agent_id=scenario["payload"].get("agent_id"),
+    )
+    return await process_transaction(payload=payload, db=db)
+
+
+@router.post("/showcase")
+async def run_showcase(db: Session = Depends(get_db)):
+    sequence = list_demo_scenarios()
+
+    async def _playback():
+        background_db = SessionLocal()
+        try:
+            for scenario in sequence:
+                payload = TransactionCreate(
+                    phone_number=scenario["payload"]["phone_number"],
+                    amount=scenario["payload"]["amount"],
+                    currency=scenario["payload"]["currency"],
+                    transaction_type=TransactionType(scenario["payload"]["transaction_type"]),
+                    recipient=scenario["payload"].get("recipient"),
+                    agent_id=scenario["payload"].get("agent_id"),
+                )
+                await process_transaction(payload=payload, db=background_db)
+                await asyncio.sleep(1.2)
+        finally:
+            background_db.close()
+
+    asyncio.create_task(_playback())
+    return {"status": "started", "sequence": [item["id"] for item in sequence]}

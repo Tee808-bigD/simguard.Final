@@ -1,187 +1,113 @@
-# 🛡 SimGuard — Real-time SIM Swap Fraud Prevention
+# SimGuard
 
-**Africa Ignite Hackathon 2026** | Prize: GBP 3,000 + MWC Kigali showcase
+SimGuard is a prototype-stage fraud prevention platform for African mobile money agents. It combines Nokia CAMARA trust signals with deterministic or live AI decisioning to help agents decide whether to approve, flag, or block a transaction in real time.
 
----
+## Why this prototype fits the hackathon
 
-## Problem
+- Theme: Financial Inclusion, Secure Payments & Anti-Fraud
+- CAMARA APIs surfaced in the workflow: SIM Swap, Device Swap, Number Verification
+- Bonus layer: agentic AI decisioning with a reliable simulation fallback
+- Prototype format covered: live demo, architecture story, business model, screenshots/video notes, and team positioning docs under `docs/`
 
-Over **$500M lost annually** to SIM swap fraud in Africa. Current detection takes hours or days. Mobile money agents unknowingly process fraudulent transactions.
+## Demo modes
 
-## Solution
+SimGuard now supports:
 
-SimGuard is an API-powered, AI-driven fraud detection system that:
+- `SIMULATION`: default and recommended for judging; all showcase scenarios are deterministic
+- `AUTO`: attempts live Nokia or Anthropic integrations, then falls back safely
+- `LIVE`: prefers live integrations when configured
 
-- ✅ Detects SIM swaps in **real-time** using Nokia CAMARA APIs
-- ✅ Verifies device integrity before high-value transactions
-- ✅ Uses **Claude AI** as an agentic fraud decision engine
-- ✅ Gives mobile money agents instant GO/BLOCK/FLAG guidance
-- ✅ Live dashboard updates via WebSocket
+Set this in `.env` with:
 
----
+```env
+INTEGRATION_MODE=SIMULATION
+```
+
+## Guided demo scenarios
+
+The UI and backend expose three repeatable scenarios:
+
+- `block_sim_swap`: salary-day SIM swap drain attempt
+- `flag_device_takeover`: suspicious device change before withdrawal
+- `approve_verified_customer`: clean returning customer
+
+For a fast judged demo:
+
+1. Open the app.
+2. Click `Run 3-step showcase`.
+3. Watch the result panel, signal cards, live feed, and alert feed update.
+4. Call out the `source` badges to explain simulation versus live provenance.
 
 ## Architecture
 
-```
-React Dashboard (Vite + TailwindCSS + Recharts)
-        │ REST + WebSocket
-FastAPI Backend
-  ├── Transaction Service
-  ├── Fraud Detector (rule-based scoring)
-  ├── Claude AI Engine (agentic decisions)
-  └── CAMARA API Gateway
-        ├── SIM Swap API
-        ├── Device Swap API
-        └── Number Verification API
-SQLite (dev) / PostgreSQL (prod)
-```
+```text
+React/Vite prototype surface
+  -> Guided scenarios
+  -> Agent transaction check
+  -> Live feed and risk dashboard
 
-## Tech Stack
+FastAPI backend
+  -> Transactions API
+  -> Fraud quick check API
+  -> Verification API
+  -> Demo/showcase API
+  -> WebSocket broadcast channel
 
-| Layer     | Technology                          |
-|-----------|-------------------------------------|
-| Backend   | Python 3.11 · FastAPI · SQLAlchemy  |
-| Frontend  | React 18 · Vite · TailwindCSS       |
-| AI Engine | Anthropic Claude API                |
-| CAMARA    | Nokia Network as Code (RapidAPI)    |
-| Database  | SQLite (dev) · PostgreSQL (prod)    |
-| Deploy    | Docker + docker-compose             |
+Decision services
+  -> CAMARA trust signal adapter
+  -> Risk scoring engine
+  -> AI decision engine with deterministic fallback
 
----
-
-## Quick Start
-
-### 1. Clone & Configure
-
-```bash
-git clone <your-repo>
-cd simguard
-cp .env.example .env
-# Edit .env — add your NAC_API_KEY and ANTHROPIC_API_KEY
+Storage
+  -> SQLite in local prototype mode
 ```
 
-### 2. Backend
+## Local run
+
+### Backend
 
 ```bash
 cd backend
-python3 -m venv venv && source venv/bin/activate   # Windows: venv\Scripts\activate
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
 ```
 
-### 3. Frontend
+### Frontend
 
 ```bash
 cd frontend
 npm install
 npm run dev
-# Open http://localhost:5173
 ```
 
-### 4. Docker (full stack)
+Frontend runs on [http://localhost:5173](http://localhost:5173) and proxies API traffic to port `8000`.
 
-```bash
-docker-compose up --build
-# Backend: http://localhost:8000
-# Frontend: http://localhost:5173
-```
+## Main API surfaces
 
----
+- `POST /api/transactions`
+- `GET /api/transactions`
+- `POST /api/fraud/check`
+- `GET /api/verification/full-check/{phone}`
+- `GET /api/demo/scenarios`
+- `POST /api/demo/run-scenario/{scenario_id}`
+- `POST /api/demo/showcase`
+- `POST /api/demo/reset`
+- `WS /ws/alerts`
 
-## API Endpoints
+## Submission assets
 
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/transactions` | Submit transaction for fraud check |
-| GET | `/api/transactions` | List transactions |
-| GET | `/api/transactions/{id}` | Get transaction detail |
-| POST | `/api/fraud/check` | Quick fraud check (no DB write) |
-| GET | `/api/fraud/alerts` | List fraud alerts |
-| GET | `/api/dashboard/stats` | KPI statistics |
-| GET | `/api/dashboard/timeline` | Hourly transaction chart data |
-| GET | `/api/dashboard/risk-distribution` | Risk level breakdown |
-| GET | `/api/verification/sim-status/{phone}` | SIM swap status |
-| GET | `/api/verification/device-status/{phone}` | Device swap status |
-| GET | `/api/verification/full-check/{phone}` | All CAMARA checks |
-| WS | `/ws/alerts` | Real-time alert stream |
+Supporting prototype-round materials live in `docs/`:
 
----
+- `prototype-deck.md`
+- `api-usage-synopsis.md`
+- `commercial-summary.md`
+- `judge-script.md`
+- `demo-evidence.md`
 
-## Nokia Test Numbers (Sandbox)
+## Recommended judging script
 
-| Number | Simulates |
-|--------|-----------|
-| `+99999991000` | SIM swap detected → **BLOCK** |
-| `+99999991001` | Clean number → **APPROVE** |
-| `+99999991002` | Device swap detected → **FLAG** |
-
----
-
-## Fraud Detection Logic
-
-### Risk Scoring (0–100)
-
-```
-SIM swap within 24h          +60 pts   ← Critical
-SIM swap within 7d           +40 pts
-Device swap detected         +30 pts
-Amount > $1,000 equiv.       +30 pts
-Amount > $500 equiv.         +20 pts
-Composite: swap + high value +25 pts
-Composite: swap + new recip  +20 pts
-Both SIM + device swapped    +15 pts
-```
-
-### AI Decision Thresholds
-
-| Decision | Condition |
-|----------|-----------|
-| BLOCK | score ≥ 60 OR SIM swap <24h + amount >$100 |
-| FLAG_FOR_REVIEW | score 30–59 |
-| APPROVE | score <30 AND no recent swap |
-
----
-
-## Security Measures
-
-- ✅ All secrets in `.env` only — never in code
-- ✅ `.env` in `.gitignore` — cannot be committed
-- ✅ Rate limiting: 60 req/min (global), 10/min (fraud endpoints)
-- ✅ Max payload size: 1MB
-- ✅ Phone number E.164 validation
-- ✅ Currency whitelist (19 currencies)
-- ✅ HTML/injection sanitization on all inputs
-- ✅ CORS restricted to configured origins
-
----
-
-## Currencies Supported
-
-KES · UGX · TZS · ZMW · GHS · NGN · ZAR · RWF · MWK · ETB · XOF · USD · EUR · GBP · MZN · XAF · AOA · MAD · EGP
-
----
-
-## Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `NAC_API_KEY` | Nokia Network as Code (RapidAPI) |
-| `ANTHROPIC_API_KEY` | Anthropic Claude API |
-| `DATABASE_URL` | SQLite or PostgreSQL URL |
-| `CORS_ORIGINS` | Allowed frontend origins (comma-separated) |
-| `RATE_LIMIT_PER_MINUTE` | Global rate limit (default: 60) |
-| `AUTH_RATE_LIMIT_PER_MINUTE` | Auth endpoint limit (default: 10) |
-| `MAX_PAYLOAD_SIZE` | Max request body in bytes (default: 1MB) |
-| `APP_ENV` | `development` or `production` |
-
----
-
-## Why SimGuard Wins
-
-1. **3 CAMARA APIs** across 2 categories → maximum integration score
-2. **Agentic Claude AI** → genuine innovation, bonus points
-3. **$500M+ real-world problem** → strong impact narrative
-4. **Full-stack working demo** → technical feasibility proven
-5. **Agent portal** → directly addresses "agents unknowingly processing fraud"
-6. **Real-time WebSocket** → impressive live demo
-7. **Production-ready security** → scalability demonstrated
+- Start in `SIMULATION` mode for certainty.
+- Run the 3-step showcase.
+- Explain how each transaction uses telecom trust signals before money moves.
+- Point out how the same contract supports `AUTO` or `LIVE` mode when keys are configured.
+- Close on scalability: mobile money agents, PSPs, and MNO fraud teams can all consume the same decision surface.

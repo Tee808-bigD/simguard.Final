@@ -1,15 +1,17 @@
 import re
 from datetime import datetime
 from typing import Optional
+
 from pydantic import BaseModel, Field, field_validator
-from ..models.transaction import TransactionType, TransactionStatus
+
+from ..models.transaction import TransactionStatus, TransactionType
 
 PHONE_RE = re.compile(r"^\+[1-9]\d{6,14}$")
 
 SUPPORTED_CURRENCIES = {
     "KES", "UGX", "TZS", "ZMW", "GHS", "NGN", "ZAR",
     "USD", "EUR", "GBP", "MWK", "MZN", "RWF", "ETB",
-    "XOF", "XAF", "AOA", "MAD", "EGP"
+    "XOF", "XAF", "AOA", "MAD", "EGP",
 }
 
 
@@ -23,27 +25,26 @@ class TransactionCreate(BaseModel):
 
     @field_validator("phone_number")
     @classmethod
-    def validate_phone(cls, v: str) -> str:
-        v = v.strip()
-        if not PHONE_RE.match(v):
+    def validate_phone(cls, value: str) -> str:
+        value = value.strip()
+        if not PHONE_RE.match(value):
             raise ValueError("Phone must be E.164 format, e.g. +254712345678")
-        return v
+        return value
 
     @field_validator("currency")
     @classmethod
-    def validate_currency(cls, v: str) -> str:
-        v = v.strip().upper()
-        if v not in SUPPORTED_CURRENCIES:
+    def validate_currency(cls, value: str) -> str:
+        value = value.strip().upper()
+        if value not in SUPPORTED_CURRENCIES:
             raise ValueError(f"Unsupported currency. Supported: {', '.join(sorted(SUPPORTED_CURRENCIES))}")
-        return v
+        return value
 
     @field_validator("recipient")
     @classmethod
-    def sanitize_recipient(cls, v: Optional[str]) -> Optional[str]:
-        if v:
-            # Strip HTML-like tags
-            v = re.sub(r"<[^>]+>", "", v).strip()
-        return v or None
+    def sanitize_recipient(cls, value: Optional[str]) -> Optional[str]:
+        if value:
+            value = re.sub(r"<[^>]+>", "", value).strip()
+        return value or None
 
 
 class TransactionResponse(BaseModel):
@@ -55,8 +56,15 @@ class TransactionResponse(BaseModel):
     recipient: Optional[str]
     status: TransactionStatus
     risk_score: int
+    risk_level: Optional[str] = None
     ai_decision: Optional[str]
     ai_explanation: Optional[str]
+    primary_reason: Optional[str] = None
+    recommended_actions: list[str] = []
+    confidence: Optional[int] = None
+    fraud_pattern: Optional[str] = None
+    source: Optional[str] = None
+    integration_mode: Optional[str] = None
     camara_results: Optional[dict]
     created_at: datetime
 
