@@ -70,6 +70,15 @@ Storage
 cd backend
 python -m pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
+
+Recomended:
+cd backend
+C:\Users\Thando\AppData\Local\Programs\Python\Python312\python.exe -m venv venv
+venv\Scripts\activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+pip install fastapi uvicorn sqlalchemy pydantic pydantic-settings python-dotenv httpx
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 ### Frontend
